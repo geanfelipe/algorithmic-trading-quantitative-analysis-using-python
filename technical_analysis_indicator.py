@@ -90,7 +90,7 @@ def slope(serie: pandas.Series, window: int) -> numpy.array:
     "function to calculate the slope of N consecutive points on a plot"
     slopes = [i * 0 for i in range(window - 1)]
     for i in range(window, len(serie) + 1):
-        y = serie[i - window: i]
+        y = serie[i - window : i]
         x = numpy.array(range(window))
         y_range = y.max() - y.min()
         if y_range == 0:
@@ -101,7 +101,7 @@ def slope(serie: pandas.Series, window: int) -> numpy.array:
         x_scaled = statsmodel.add_constant(x_scaled)
         model = statsmodel.OLS(y_scaled, x_scaled)
         results = model.fit()
-        slopes.append(results.params[-1])
+        slopes.append(results.params.iloc[-1])
     slope_angle = numpy.rad2deg(numpy.arctan(numpy.array(slopes)))
     return numpy.array(slope_angle)
 
@@ -110,17 +110,20 @@ def renko(quotes: pandas.DataFrame) -> dict:
     "function to convert quotes data into renko bricks"
     atr_df = atr(quotes, 120)
     results = {}
-    quotes_without_index = quotes.reset_index().copy()
 
     for ticker in quotes.columns.get_level_values(1).unique():
+        ticker_quotes = quotes.xs(ticker, level=1, axis=1).copy()
+        ticker_quotes = ticker_quotes.reset_index()
+        date_column = ticker_quotes.columns[0]
+
         ticker_df = pandas.DataFrame(
             {
-                "date": quotes_without_index["Datetime"],
-                "open": quotes_without_index["Open"][ticker],
-                "high": quotes_without_index["High"][ticker],
-                "low": quotes_without_index["Low"][ticker],
-                "close": quotes_without_index["Close"][ticker],
-                "volume": quotes_without_index["Volume"][ticker],
+                "date": pandas.to_datetime(ticker_quotes[date_column]),
+                "open": ticker_quotes["Open"],
+                "high": ticker_quotes["High"],
+                "low": ticker_quotes["Low"],
+                "close": ticker_quotes["Close"],
+                "volume": ticker_quotes["Volume"],
             }
         )
 
@@ -133,14 +136,12 @@ def renko(quotes: pandas.DataFrame) -> dict:
             numpy.where(renko_df["uptrend"] == False, -1, 0),
         )
         for i in range(1, len(renko_df["bar_num"])):
-            if renko_df["bar_num"][i] > 0 and renko_df["bar_num"][i - 1] > 0:
-                renko_df.loc[i, "bar_num"] = (
-                    renko_df.loc[i, "bar_num"] + renko_df.loc[i - 1, "bar_num"]
-                )
-            elif renko_df["bar_num"][i] < 0 and renko_df["bar_num"][i - 1] < 0:
-                renko_df.loc[i, "bar_num"] = (
-                    renko_df.loc[i, "bar_num"] + renko_df.loc[i - 1, "bar_num"]
-                )
+            curr_bar = renko_df["bar_num"].iloc[i]
+            prev_bar = renko_df["bar_num"].iloc[i - 1]
+            if curr_bar > 0 and prev_bar > 0:
+                renko_df.loc[i, "bar_num"] = curr_bar + prev_bar
+            elif curr_bar < 0 and prev_bar < 0:
+                renko_df.loc[i, "bar_num"] = curr_bar + prev_bar
         renko_df.drop_duplicates(subset="date", keep="last", inplace=True)
         results[ticker] = renko_df
     return results
@@ -280,13 +281,14 @@ if __name__ == "__main__":
     ]
 
     quotes = load_quotes(tickers)
+    available_tickers = quotes.columns.get_level_values(1).unique().tolist()
     macd_data = macd(quotes)
     renko_data = renko(quotes)
     ohlc_renko = {}
     tickers_signal = {}
     tickers_return = {}
 
-    for ticker in tickers:
+    for ticker in available_tickers:
         print(f"merging for {ticker}")
 
         ticker_ohlc = pandas.DataFrame(
@@ -330,7 +332,7 @@ if __name__ == "__main__":
 
         ohlc_renko[ticker] = merged.reset_index(drop=True)
 
-    for ticker in tickers:
+    for ticker in available_tickers:
         print("calculating daily returns for", ticker)
 
         tickers_signal[ticker] = ""
@@ -408,12 +410,15 @@ if __name__ == "__main__":
     strategy_df = pandas.DataFrame(
         {
             ticker: ohlc_renko[ticker].set_index("Date")["ret"]
-            for ticker in tickers
+            for ticker in available_tickers
         }
     )
     strategy_df["ret"] = strategy_df.mean(axis=1)
     strategy_df.dropna(inplace=True)
 
     print("Strategy CAGR:", cagr(strategy_df[["ret"]], quotes_by_day=1))
-    print("Strategy Sharpe:", sharpe(strategy_df[["ret"]], quotes_by_day=1, risk_free_rate=0.04))
+    print(
+        "Strategy Sharpe:",
+        sharpe(strategy_df[["ret"]], quotes_by_day=1, risk_free_rate=0.04),
+    )
     print("Strategy Max Drawdown:", maximum_drawdown(strategy_df[["ret"]]))
