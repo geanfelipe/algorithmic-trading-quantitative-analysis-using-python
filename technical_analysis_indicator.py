@@ -110,17 +110,20 @@ def renko(quotes: pandas.DataFrame) -> dict:
     "function to convert quotes data into renko bricks"
     atr_df = atr(quotes, 120)
     results = {}
-    quotes_without_index = quotes.reset_index().copy()
 
     for ticker in quotes.columns.get_level_values(1).unique():
+        ticker_quotes = quotes.xs(ticker, level=1, axis=1).copy()
+        ticker_quotes = ticker_quotes.reset_index()
+        date_column = ticker_quotes.columns[0]
+
         ticker_df = pandas.DataFrame(
             {
-                "date": quotes_without_index["Datetime"],
-                "open": quotes_without_index["Open"][ticker],
-                "high": quotes_without_index["High"][ticker],
-                "low": quotes_without_index["Low"][ticker],
-                "close": quotes_without_index["Close"][ticker],
-                "volume": quotes_without_index["Volume"][ticker],
+                "date": pandas.to_datetime(ticker_quotes[date_column]),
+                "open": ticker_quotes["Open"],
+                "high": ticker_quotes["High"],
+                "low": ticker_quotes["Low"],
+                "close": ticker_quotes["Close"],
+                "volume": ticker_quotes["Volume"],
             }
         )
 
