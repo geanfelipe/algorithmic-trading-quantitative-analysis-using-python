@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Mar  9 22:13:01 2026
+
+@author: geanfelipe
+"""
+
+import pandas
+from pathlib import Path
+from twelvedata import TDClient
+import numpy
+from datetime import datetime, timezone, timedelta
+import copy
+import yfinance
+import matplotlib.pyplot
+import statsmodels.api as statsmodel
+from stocktrends import Renko
+
+from dotenv import load_dotenv
+import os
+
+load_dotenv()  # loads variables from .env
+MASSIVE_API_KEY = os.getenv("MASSIVE_API_KEY")
+
+
+def macd(
+    quotes: pandas.DataFrame,
+    ema_fast_period: int = 12,
+    ema_slow_period: int = 26,
+    signal: int = 9,
+) -> pandas.DataFrame:
+    """Calculate MACD for multiple tickers"""
+
+    results = []
+
+    close_prices = quotes["Close"]
+
+    for ticker in close_prices.columns:
+        price = close_prices[ticker]
+
+        ema_fast = price.ewm(
+            span=ema_fast_period, min_periods=ema_fast_period
+        ).mean()
+        ema_slow = price.ewm(
+            span=ema_slow_period, min_periods=ema_slow_period
+        ).mean()
+
+        macd = ema_fast - ema_slow
+        signal_line = macd.ewm(span=signal, min_periods=signal).mean()
+
+        temp = pandas.DataFrame(
+            {(ticker, "MACD"): macd, (ticker, "Signal"): signal_line}
+        )
+        temp.dropna(inplace=True)
+        results.append(temp)
+
+    macd_df = pandas.concat(results, axis=1)
+    macd_df.columns = pandas.MultiIndex.from_tuples(macd_df.columns)
+
+    return macd_df
+
+
+def atr(quotes: pandas.DataFrame, number_of_periods: int) -> pandas.DataFrame:
+    "function to caculate True Range and Average True Range"
+    results = []
+
+    for ticker in quotes.columns.get_level_values(1).unique():
+        df = pandas.DataFrame()
+        df["H-L"] = abs(quotes["High"][ticker] - quotes["Low"][ticker])
+        df["H-PC"] = abs(
+            quotes["High"][ticker] - quotes["Close"][ticker].shift(1)
+        )
+        df["L-PC"] = abs(
+            quotes["Low"][ticker] - quotes["Close"][ticker].shift(1)
+        )
+        df["TR"] = df[["H-L", "H-PC", "L-PC"]].max(axis=1, skipna=False)
+        df["ATR"] = df["TR"].rolling(number_of_periods).mean()
+        df.drop(["H-L", "H-PC", "L-PC"], axis=1, inplace=True)
+        temp = pandas.DataFrame(
+            {(ticker, "TR"): df["TR"], (ticker, "ATR"): df["ATR"]}
+        )
+        results.append(temp)
+    atr_df = pandas.concat(results, axis=1)
+    atr_df.columns = pandas.MultiIndex.from_tuples(atr_df.columns)
+    return atr_df
+
+
+def slope(serie: pandas.Series, window: int) -> numpy.array:
+    "function to calculate the slope of N consecutive points on a plot"
+    slopes = [i * 0 for i in range(window - 1)]
+    for i in range(window, len(serie) + 1):
+        y = serie[i - window: i]
+        x = numpy.array(range(window))
+        y_scaled = (y - y.min()) / (y.max() - y.min())
+        x_scaled = (x - x.min()) / (x.max() - x.min())
+        x_scaled = statsmodel.add_constant(x_scaled)
+        model = statsmodel.OLS(y_scaled, x_scaled)
+        results = model.fit()
+        slopes.append(results.params[-1])
+    slope_angle = numpy.rad2deg(numpy.arctan(numpy.array(slopes)))
+    return numpy.array(slope_angle)
+
+
+def renko(quotes: pandas.DataFrame) -> dict:
+    "function to convert quotes data into renko bricks"
+    atr_df = atr(quotes, 120)
+    results = {}
+    quotes_without_index = quotes.reset_index().copy()
+
+    for ticker in quotes.columns.get_level_values(1).unique():
+        ticker_df = pandas.DataFrame(
+            {
+                "date": quotes_without_index["Datetime"],
+                "open": quotes_without_index["Open"][ticker],
+                "high": quotes_without_index["High"][ticker],
+                "low": quotes_without_index["Low"][ticker],
+                "close": quotes_without_index["Close"][ticker],
+                "volume": quotes_without_index["Volume"][ticker],
+            }
+        )
+
+        renko = Renko(ticker_df)
+        renko.brick_size = max(0.5, round(atr_df[ticker]["ATR"].iloc[-1]))
+        renko_df = renko.get_ohlc_data()
+        renko_df["bar_num"] = numpy.where(
+            renko_df["uptrend"] == True,
+            1,
+            numpy.where(renko_df["uptrend"] == False, -1, 0),
+        )
+        for i in range(1, len(renko_df["bar_num"])):
+            if renko_df["bar_num"][i] > 0 and renko_df["bar_num"][i - 1] > 0:
+                renko_df.loc[i, "bar_num"] = (
+                    renko_df.loc[i, "bar_num"] + renko_df.loc[i - 1, "bar_num"]
+                )
+            elif renko_df["bar_num"][i] < 0 and renko_df["bar_num"][i - 1] < 0:
+                renko_df.loc[i, "bar_num"] = (
+                    renko_df.loc[i, "bar_num"] + renko_df.loc[i - 1, "bar_num"]
+                )
+        renko_df.drop_duplicates(subset="date", keep="last", inplace=True)
+        results[ticker] = renko_df
+    return results
+
+
+def cagr(
+    ticket_return: pandas.DataFrame, quotes_by_day: int
+) -> pandas.DataFrame:
+    "function to calculaat ethe Cumulative Annual Growth of a trading strategy"
+    ticket_return_copy = ticket_return.copy()
+    ticket_return_copy["cum_return"] = (
+        1 + ticket_return_copy["ret"]
+    ).cumprod()
+    years = len(ticket_return_copy) / (252 * quotes_by_day)
+    cagr_df = ticket_return_copy["cum_return"].tolist()[-1] ** (1 / years) - 1
+
+    return cagr_df
+
+
+def volatility(
+    ticket_return: pandas.DataFrame, quotes_by_day: int
+) -> pandas.DataFrame:
+    "function to calculate annualized volatility of a trading strategy"
+    vol = ticket_return["ret"].std() * numpy.sqrt(252 * quotes_by_day)
+    return vol
+
+
+def sharpe(
+    ticket_return: pandas.DataFrame, quotes_by_day: int, risk_free_rate: float
+) -> pandas.DataFrame:
+    "function to calculate sharpe ratio"
+    sharpe = (
+        cagr(ticket_return, quotes_by_day) - risk_free_rate
+    ) / volatility(ticket_return, quotes_by_day)
+    return sharpe
+
+
+def maximum_drawdown(ticket_return: pandas.DataFrame) -> pandas.DataFrame:
+    "function to calculate maximum drawdown"
+    ticket_return_copy = ticket_return.copy()
+    ticket_return_copy["cum_return"] = (
+        1 + ticket_return_copy["ret"]
+    ).cumprod()
+    ticket_return_copy["cum_roll_max"] = ticket_return_copy[
+        "cum_return"
+    ].cummax()
+    ticket_return_copy["drawdown"] = (
+        ticket_return_copy["cum_roll_max"] - ticket_return_copy["cum_return"]
+    )
+    ticket_return_copy["drawdown_pct"] = (
+        ticket_return_copy["drawdown"] / ticket_return_copy["cum_roll_max"]
+    )
+    max_dd = ticket_return_copy["drawdown_pct"].max()
+    return max_dd
+
+
+def load_quotes(tickers, data_path="data/"):
+    """
+    Try to download quotes from Yahoo.
+    If it fails (rate limit), load local CSV files instead.
+    """
+
+    try:
+        print("Downloading data from Yahoo Finance...")
+        quotes = yfinance.download(
+            tickers,
+            period="60d",
+            interval="5m",
+            group_by="column",
+            auto_adjust=False,
+            threads=True,
+        )
+
+        if quotes.empty:
+            raise Exception("Yahoo returned empty dataframe")
+
+        print("Yahoo download successful")
+        return quotes
+
+    except Exception as e:
+        print("Yahoo download failed. Loading local CSV files.")
+        print(e)
+
+        dfs = []
+
+        for ticker in tickers:
+            file = Path(data_path) / f"{ticker.lower()}_us_d.csv"
+
+            if not file.exists():
+                print(f"File not found for {ticker}")
+                continue
+
+            temp = pandas.read_csv(file)
+            temp.rename(columns={"Date": "Datetime"}, inplace=True)
+
+            # Convert date
+            temp["Datetime"] = pandas.to_datetime(temp["Datetime"])
+
+            # Set time = 00:00:00
+            temp["Datetime"] = temp["Datetime"].dt.normalize()
+
+            temp.set_index("Datetime", inplace=True)
+
+            # Build MultiIndex columns
+            temp.columns = pandas.MultiIndex.from_product(
+                [temp.columns, [ticker]]
+            )
+
+            dfs.append(temp)
+
+        quotes = pandas.concat(dfs, axis=1)
+        return quotes
+
+
+if __name__ == "__main__":
+    tickers = [
+        "AAPL",  # Apple
+        "MSFT",  # Microsoft
+        "AMZN",  # Amazon
+        "GOOGL",  # Alphabet
+        "META",  # Meta Platforms
+        "NVDA",  # Nvidia
+        "TSLA",  # Tesla
+        "JPM",  # JPMorgan Chase
+        "V",  # Visa
+        "MA",  # Mastercard
+        "UNH",  # UnitedHealth
+        "HD",  # Home Depot
+        "PG",  # Procter & Gamble
+        "KO",  # Coca-Cola
+        "PEP",  # PepsiCo
+        "COST",  # Costco
+        "AVGO",  # Broadcom
+        "AMD",  # Advanced Micro Devices
+        "CRM",  # Salesforce
+        "ADBE",  # Adobe
+    ]
+
+    quotes = load_quotes(tickers)
+
+    macd = macd(quotes)
+    renko = renko(quotes)
+    tickers_signal = {}
+    tickers_return = {}
+
+    for ticker in tickers:
+        print('calculating daily returns for ', ticker)
+
+        if not ticker in tickers_return:
+            tickers_return[ticker] = []
+
+        for i in range(len(renko[ticker])):
+            if not ticker in tickers_signal:
+                tickers_return[ticker].append(0)
+
+                if i > 0:
+                    if renko[ticker]['bar_num'][i] >= 2 and renko[ticker]['macd'][i] > renko[ticker]['macd_sig'][i]
