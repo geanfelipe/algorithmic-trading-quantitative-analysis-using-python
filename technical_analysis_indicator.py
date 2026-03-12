@@ -92,7 +92,11 @@ def slope(serie: pandas.Series, window: int) -> numpy.array:
     for i in range(window, len(serie) + 1):
         y = serie[i - window: i]
         x = numpy.array(range(window))
-        y_scaled = (y - y.min()) / (y.max() - y.min())
+        y_range = y.max() - y.min()
+        if y_range == 0:
+            slopes.append(0)
+            continue
+        y_scaled = (y - y.min()) / y_range
         x_scaled = (x - x.min()) / (x.max() - x.min())
         x_scaled = statsmodel.add_constant(x_scaled)
         model = statsmodel.OLS(y_scaled, x_scaled)
@@ -276,21 +280,140 @@ if __name__ == "__main__":
     ]
 
     quotes = load_quotes(tickers)
-
-    macd = macd(quotes)
-    renko = renko(quotes)
+    macd_data = macd(quotes)
+    renko_data = renko(quotes)
+    ohlc_renko = {}
     tickers_signal = {}
     tickers_return = {}
 
     for ticker in tickers:
-        print('calculating daily returns for ', ticker)
+        print(f"merging for {ticker}")
 
-        if not ticker in tickers_return:
-            tickers_return[ticker] = []
+        ticker_ohlc = pandas.DataFrame(
+            {
+                "Date": quotes["Close"][ticker].index,
+                "Open": quotes["Open"][ticker].values,
+                "High": quotes["High"][ticker].values,
+                "Low": quotes["Low"][ticker].values,
+                "Close": quotes["Close"][ticker].values,
+                "Adj Close": quotes["Close"][ticker].values,
+                "Volume": quotes["Volume"][ticker].values,
+            }
+        )
 
-        for i in range(len(renko[ticker])):
-            if not ticker in tickers_signal:
+        ticker_ohlc.dropna(inplace=True)
+        ticker_ohlc["Date"] = pandas.to_datetime(ticker_ohlc["Date"])
+
+        ticker_renko = renko_data[ticker].copy()
+        ticker_renko = ticker_renko[["date", "bar_num"]]
+        ticker_renko.rename(columns={"date": "Date"}, inplace=True)
+        ticker_renko["Date"] = pandas.to_datetime(ticker_renko["Date"])
+
+        merged = ticker_ohlc.merge(ticker_renko, how="outer", on="Date")
+        merged.sort_values("Date", inplace=True)
+        merged["bar_num"] = merged["bar_num"].ffill()
+        merged["bar_num"] = merged["bar_num"].fillna(0)
+
+        merged_macd = pandas.DataFrame(
+            {
+                "Date": macd_data.index,
+                "macd": macd_data[(ticker, "MACD")].values,
+                "macd_sig": macd_data[(ticker, "Signal")].values,
+            }
+        )
+
+        merged = merged.merge(merged_macd, how="left", on="Date")
+        merged["macd"] = merged["macd"].ffill()
+        merged["macd_sig"] = merged["macd_sig"].ffill()
+        merged["macd_slope"] = slope(merged["macd"].fillna(0), 5)
+        merged["macd_sig_slope"] = slope(merged["macd_sig"].fillna(0), 5)
+
+        ohlc_renko[ticker] = merged.reset_index(drop=True)
+
+    for ticker in tickers:
+        print("calculating daily returns for", ticker)
+
+        tickers_signal[ticker] = ""
+        tickers_return[ticker] = []
+
+        for i in range(len(ohlc_renko[ticker])):
+            if tickers_signal[ticker] == "":
                 tickers_return[ticker].append(0)
-
                 if i > 0:
-                    if renko[ticker]['bar_num'][i] >= 2 and renko[ticker]['macd'][i] > renko[ticker]['macd_sig'][i]
+                    if (
+                        ohlc_renko[ticker]["bar_num"].iloc[i] >= 2
+                        and ohlc_renko[ticker]["macd"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = "Buy"
+                    elif (
+                        ohlc_renko[ticker]["bar_num"].iloc[i] <= -2
+                        and ohlc_renko[ticker]["macd"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = "Sell"
+
+            elif tickers_signal[ticker] == "Buy":
+                tickers_return[ticker].append(
+                    ohlc_renko[ticker]["Adj Close"].iloc[i]
+                    / ohlc_renko[ticker]["Adj Close"].iloc[i - 1]
+                    - 1
+                )
+                if i > 0:
+                    if (
+                        ohlc_renko[ticker]["bar_num"].iloc[i] <= -2
+                        and ohlc_renko[ticker]["macd"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = "Sell"
+                    elif (
+                        ohlc_renko[ticker]["macd"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = ""
+
+            elif tickers_signal[ticker] == "Sell":
+                tickers_return[ticker].append(
+                    ohlc_renko[ticker]["Adj Close"].iloc[i - 1]
+                    / ohlc_renko[ticker]["Adj Close"].iloc[i]
+                    - 1
+                )
+                if i > 0:
+                    if (
+                        ohlc_renko[ticker]["bar_num"].iloc[i] >= 2
+                        and ohlc_renko[ticker]["macd"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = "Buy"
+                    elif (
+                        ohlc_renko[ticker]["macd"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = ""
+
+        ohlc_renko[ticker]["ret"] = numpy.array(tickers_return[ticker])
+
+    strategy_df = pandas.DataFrame(
+        {
+            ticker: ohlc_renko[ticker].set_index("Date")["ret"]
+            for ticker in tickers
+        }
+    )
+    strategy_df["ret"] = strategy_df.mean(axis=1)
+    strategy_df.dropna(inplace=True)
+
+    print("Strategy CAGR:", cagr(strategy_df[["ret"]], quotes_by_day=1))
+    print("Strategy Sharpe:", sharpe(strategy_df[["ret"]], quotes_by_day=1, risk_free_rate=0.04))
+    print("Strategy Max Drawdown:", maximum_drawdown(strategy_df[["ret"]]))
