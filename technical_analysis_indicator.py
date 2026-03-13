@@ -19,6 +19,7 @@ from stocktrends import Renko
 
 from dotenv import load_dotenv
 import os
+import itertools
 
 load_dotenv()  # loads variables from .env
 MASSIVE_API_KEY = os.getenv("MASSIVE_API_KEY")
@@ -92,12 +93,16 @@ def slope(serie: pandas.Series, window: int) -> numpy.array:
     for i in range(window, len(serie) + 1):
         y = serie[i - window: i]
         x = numpy.array(range(window))
-        y_scaled = (y - y.min()) / (y.max() - y.min())
+        y_range = y.max() - y.min()
+        if y_range == 0:
+            slopes.append(0)
+            continue
+        y_scaled = (y - y.min()) / y_range
         x_scaled = (x - x.min()) / (x.max() - x.min())
         x_scaled = statsmodel.add_constant(x_scaled)
         model = statsmodel.OLS(y_scaled, x_scaled)
         results = model.fit()
-        slopes.append(results.params[-1])
+        slopes.append(results.params.iloc[-1])
     slope_angle = numpy.rad2deg(numpy.arctan(numpy.array(slopes)))
     return numpy.array(slope_angle)
 
@@ -106,17 +111,20 @@ def renko(quotes: pandas.DataFrame) -> dict:
     "function to convert quotes data into renko bricks"
     atr_df = atr(quotes, 120)
     results = {}
-    quotes_without_index = quotes.reset_index().copy()
 
     for ticker in quotes.columns.get_level_values(1).unique():
+        ticker_quotes = quotes.xs(ticker, level=1, axis=1).copy()
+        ticker_quotes = ticker_quotes.reset_index()
+        date_column = ticker_quotes.columns[0]
+
         ticker_df = pandas.DataFrame(
             {
-                "date": quotes_without_index["Datetime"],
-                "open": quotes_without_index["Open"][ticker],
-                "high": quotes_without_index["High"][ticker],
-                "low": quotes_without_index["Low"][ticker],
-                "close": quotes_without_index["Close"][ticker],
-                "volume": quotes_without_index["Volume"][ticker],
+                "date": pandas.to_datetime(ticker_quotes[date_column]),
+                "open": ticker_quotes["Open"],
+                "high": ticker_quotes["High"],
+                "low": ticker_quotes["Low"],
+                "close": ticker_quotes["Close"],
+                "volume": ticker_quotes["Volume"],
             }
         )
 
@@ -129,14 +137,12 @@ def renko(quotes: pandas.DataFrame) -> dict:
             numpy.where(renko_df["uptrend"] == False, -1, 0),
         )
         for i in range(1, len(renko_df["bar_num"])):
-            if renko_df["bar_num"][i] > 0 and renko_df["bar_num"][i - 1] > 0:
-                renko_df.loc[i, "bar_num"] = (
-                    renko_df.loc[i, "bar_num"] + renko_df.loc[i - 1, "bar_num"]
-                )
-            elif renko_df["bar_num"][i] < 0 and renko_df["bar_num"][i - 1] < 0:
-                renko_df.loc[i, "bar_num"] = (
-                    renko_df.loc[i, "bar_num"] + renko_df.loc[i - 1, "bar_num"]
-                )
+            curr_bar = renko_df["bar_num"].iloc[i]
+            prev_bar = renko_df["bar_num"].iloc[i - 1]
+            if curr_bar > 0 and prev_bar > 0:
+                renko_df.loc[i, "bar_num"] = curr_bar + prev_bar
+            elif curr_bar < 0 and prev_bar < 0:
+                renko_df.loc[i, "bar_num"] = curr_bar + prev_bar
         renko_df.drop_duplicates(subset="date", keep="last", inplace=True)
         results[ticker] = renko_df
     return results
@@ -191,6 +197,84 @@ def maximum_drawdown(ticket_return: pandas.DataFrame) -> pandas.DataFrame:
     )
     max_dd = ticket_return_copy["drawdown_pct"].max()
     return max_dd
+
+
+def find_best_10_stock_combinations(
+    ohlc_renko: dict,
+    combo_size: int = 10,
+    top_n: int = 10,
+    quotes_by_day: int = 1,
+    risk_free_rate: float = 0.04,
+    max_combinations: int | None = None,
+    random_state: int = 42,
+) -> pandas.DataFrame:
+    """Evaluate combinations of stocks using the current ohlc_renko structure.
+
+    Expects ohlc_renko to be a dict keyed by ticker where each value is a
+    DataFrame containing at least ['Date', 'ret'] columns.
+    """
+    if combo_size <= 0:
+        raise ValueError("combo_size must be positive")
+
+    returns_by_ticker = {}
+    for ticker, ticker_df in ohlc_renko.items():
+        if "Date" not in ticker_df.columns or "ret" not in ticker_df.columns:
+            continue
+        returns_by_ticker[ticker] = ticker_df.set_index("Date")["ret"]
+
+    if len(returns_by_ticker) < combo_size:
+        raise ValueError(
+            f"Not enough tickers with return data: {len(returns_by_ticker)} available, {combo_size} required"
+        )
+
+    returns_df = pandas.DataFrame(returns_by_ticker).dropna(how="all")
+    tickers = sorted(returns_df.columns.tolist())
+    all_combinations = list(itertools.combinations(tickers, combo_size))
+
+    if max_combinations is not None and max_combinations < len(all_combinations):
+        rng = numpy.random.default_rng(random_state)
+        sampled_idx = rng.choice(len(all_combinations), size=max_combinations, replace=False)
+        combinations_to_test = [all_combinations[i] for i in sorted(sampled_idx)]
+    else:
+        combinations_to_test = all_combinations
+
+    rows = []
+    for combo in combinations_to_test:
+        combo_returns = returns_df[list(combo)].mean(axis=1).dropna()
+
+        if combo_returns.empty:
+            continue
+
+        combo_df = pandas.DataFrame({"ret": combo_returns})
+
+        vol = volatility(combo_df, quotes_by_day)
+        if vol == 0 or pandas.isna(vol):
+            continue
+
+        cagr_value = cagr(combo_df, quotes_by_day)
+        sharpe_value = sharpe(combo_df, quotes_by_day, risk_free_rate)
+        max_dd_value = maximum_drawdown(combo_df)
+        score = sharpe_value - max_dd_value
+
+        rows.append(
+            {
+                "tickers": ",".join(combo),
+                "cagr": cagr_value,
+                "volatility": vol,
+                "sharpe": sharpe_value,
+                "max_drawdown": max_dd_value,
+                "score": score,
+            }
+        )
+
+    if not rows:
+        return pandas.DataFrame(
+            columns=["tickers", "cagr", "volatility", "sharpe", "max_drawdown", "score"]
+        )
+
+    results = pandas.DataFrame(rows)
+    results.sort_values(["score", "sharpe", "cagr"], ascending=False, inplace=True)
+    return results.head(top_n).reset_index(drop=True)
 
 
 def load_quotes(tickers, data_path="data/"):
@@ -276,21 +360,151 @@ if __name__ == "__main__":
     ]
 
     quotes = load_quotes(tickers)
-
-    macd = macd(quotes)
-    renko = renko(quotes)
+    available_tickers = quotes.columns.get_level_values(1).unique().tolist()
+    macd_data = macd(quotes)
+    renko_data = renko(quotes)
+    ohlc_renko = {}
     tickers_signal = {}
     tickers_return = {}
 
-    for ticker in tickers:
-        print('calculating daily returns for ', ticker)
+    for ticker in available_tickers:
+        print(f"merging for {ticker}")
 
-        if not ticker in tickers_return:
-            tickers_return[ticker] = []
+        ticker_ohlc = pandas.DataFrame(
+            {
+                "Date": quotes["Close"][ticker].index,
+                "Open": quotes["Open"][ticker].values,
+                "High": quotes["High"][ticker].values,
+                "Low": quotes["Low"][ticker].values,
+                "Close": quotes["Close"][ticker].values,
+                "Adj Close": quotes["Close"][ticker].values,
+                "Volume": quotes["Volume"][ticker].values,
+            }
+        )
 
-        for i in range(len(renko[ticker])):
-            if not ticker in tickers_signal:
+        ticker_ohlc.dropna(inplace=True)
+        ticker_ohlc["Date"] = pandas.to_datetime(ticker_ohlc["Date"])
+
+        ticker_renko = renko_data[ticker].copy()
+        ticker_renko = ticker_renko[["date", "bar_num"]]
+        ticker_renko.rename(columns={"date": "Date"}, inplace=True)
+        ticker_renko["Date"] = pandas.to_datetime(ticker_renko["Date"])
+
+        merged = ticker_ohlc.merge(ticker_renko, how="outer", on="Date")
+        merged.sort_values("Date", inplace=True)
+        merged["bar_num"] = merged["bar_num"].ffill()
+        merged["bar_num"] = merged["bar_num"].fillna(0)
+
+        merged_macd = pandas.DataFrame(
+            {
+                "Date": macd_data.index,
+                "macd": macd_data[(ticker, "MACD")].values,
+                "macd_sig": macd_data[(ticker, "Signal")].values,
+            }
+        )
+
+        merged = merged.merge(merged_macd, how="left", on="Date")
+        merged["macd"] = merged["macd"].ffill()
+        merged["macd_sig"] = merged["macd_sig"].ffill()
+        merged["macd_slope"] = slope(merged["macd"].fillna(0), 5)
+        merged["macd_sig_slope"] = slope(merged["macd_sig"].fillna(0), 5)
+
+        ohlc_renko[ticker] = merged.reset_index(drop=True)
+
+    for ticker in available_tickers:
+        print("calculating daily returns for", ticker)
+
+        tickers_signal[ticker] = ""
+        tickers_return[ticker] = []
+
+        for i in range(len(ohlc_renko[ticker])):
+            if tickers_signal[ticker] == "":
                 tickers_return[ticker].append(0)
-
                 if i > 0:
-                    if renko[ticker]['bar_num'][i] >= 2 and renko[ticker]['macd'][i] > renko[ticker]['macd_sig'][i]
+                    if (
+                        ohlc_renko[ticker]["bar_num"].iloc[i] >= 2
+                        and ohlc_renko[ticker]["macd"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = "Buy"
+                    elif (
+                        ohlc_renko[ticker]["bar_num"].iloc[i] <= -2
+                        and ohlc_renko[ticker]["macd"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = "Sell"
+
+            elif tickers_signal[ticker] == "Buy":
+                tickers_return[ticker].append(
+                    ohlc_renko[ticker]["Adj Close"].iloc[i]
+                    / ohlc_renko[ticker]["Adj Close"].iloc[i - 1]
+                    - 1
+                )
+                if i > 0:
+                    if (
+                        ohlc_renko[ticker]["bar_num"].iloc[i] <= -2
+                        and ohlc_renko[ticker]["macd"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = "Sell"
+                    elif (
+                        ohlc_renko[ticker]["macd"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        < ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = ""
+
+            elif tickers_signal[ticker] == "Sell":
+                tickers_return[ticker].append(
+                    ohlc_renko[ticker]["Adj Close"].iloc[i - 1]
+                    / ohlc_renko[ticker]["Adj Close"].iloc[i]
+                    - 1
+                )
+                if i > 0:
+                    if (
+                        ohlc_renko[ticker]["bar_num"].iloc[i] >= 2
+                        and ohlc_renko[ticker]["macd"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = "Buy"
+                    elif (
+                        ohlc_renko[ticker]["macd"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig"].iloc[i]
+                        and ohlc_renko[ticker]["macd_slope"].iloc[i]
+                        > ohlc_renko[ticker]["macd_sig_slope"].iloc[i]
+                    ):
+                        tickers_signal[ticker] = ""
+
+        ohlc_renko[ticker]["ret"] = numpy.array(tickers_return[ticker])
+
+    strategy_df = pandas.DataFrame(
+        {
+            ticker: ohlc_renko[ticker].set_index("Date")["ret"]
+            for ticker in available_tickers
+        }
+    )
+    strategy_df["ret"] = strategy_df.mean(axis=1)
+    strategy_df.dropna(inplace=True)
+
+    print("Strategy CAGR:", cagr(strategy_df[["ret"]], quotes_by_day=1))
+    print("Strategy Sharpe:", sharpe(strategy_df[["ret"]], quotes_by_day=1, risk_free_rate=0.04))
+    print("Strategy Max Drawdown:", maximum_drawdown(strategy_df[["ret"]]))
+
+    best_combinations = find_best_10_stock_combinations(
+        ohlc_renko,
+        combo_size=min(10, len(available_tickers)),
+        top_n=10,
+        quotes_by_day=1,
+        risk_free_rate=0.04,
+    )
+    print("Top stock combinations:")
+    print(best_combinations)
