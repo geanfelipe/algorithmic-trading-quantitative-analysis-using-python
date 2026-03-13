@@ -16,6 +16,8 @@ import yfinance
 import matplotlib.pyplot
 import statsmodels.api as statsmodel
 from stocktrends import Renko
+import itertools
+
 
 from dotenv import load_dotenv
 import os
@@ -196,6 +198,89 @@ def maximum_drawdown(ticket_return: pandas.DataFrame) -> pandas.DataFrame:
     )
     max_dd = ticket_return_copy["drawdown_pct"].max()
     return max_dd
+
+
+def find_best_10_stock_combinations(
+    ohlc_renko: dict,
+    combo_size: int = 10,
+    top_n: int = 10,
+    quotes_by_day: int = 1,
+    risk_free_rate: float = 0.04,
+    max_combinations: int | None = None,
+) -> pandas.DataFrame:
+    """Evaluate stock combinations using the current ohlc_renko structure.
+
+    Parameters are tailored to this project where `ohlc_renko` is a dict in the
+    format: {ticker: DataFrame with columns ['Date', 'ret', ...]}.
+    """
+    if combo_size <= 0:
+        raise ValueError("combo_size must be positive")
+
+    returns_by_ticker = {}
+    for ticker, ticker_df in ohlc_renko.items():
+        if "Date" not in ticker_df.columns or "ret" not in ticker_df.columns:
+            continue
+        returns_by_ticker[ticker] = ticker_df.set_index("Date")["ret"]
+
+    if len(returns_by_ticker) < combo_size:
+        raise ValueError(
+            "Not enough tickers with return data: "
+            f"{len(returns_by_ticker)} available, {combo_size} required"
+        )
+
+    returns_df = pandas.DataFrame(returns_by_ticker).dropna(how="all")
+    tickers = sorted(returns_df.columns.tolist())
+
+    combinations_iter = itertools.combinations(tickers, combo_size)
+    if max_combinations is not None:
+        combinations_iter = itertools.islice(
+            combinations_iter, max_combinations
+        )
+
+    rows = []
+    for combo in combinations_iter:
+        combo_returns = returns_df[list(combo)].mean(axis=1).dropna()
+        if combo_returns.empty:
+            continue
+
+        combo_df = pandas.DataFrame({"ret": combo_returns})
+        vol = volatility(combo_df, quotes_by_day)
+
+        if vol == 0 or pandas.isna(vol):
+            continue
+
+        cagr_value = cagr(combo_df, quotes_by_day)
+        sharpe_value = sharpe(combo_df, quotes_by_day, risk_free_rate)
+        max_dd_value = maximum_drawdown(combo_df)
+
+        rows.append(
+            {
+                "tickers": ",".join(combo),
+                "cagr": cagr_value,
+                "volatility": vol,
+                "sharpe": sharpe_value,
+                "max_drawdown": max_dd_value,
+                "score": sharpe_value - max_dd_value,
+            }
+        )
+
+    if not rows:
+        return pandas.DataFrame(
+            columns=[
+                "tickers",
+                "cagr",
+                "volatility",
+                "sharpe",
+                "max_drawdown",
+                "score",
+            ]
+        )
+
+    results = pandas.DataFrame(rows)
+    results.sort_values(
+        ["score", "sharpe", "cagr"], ascending=False, inplace=True
+    )
+    return results.head(top_n).reset_index(drop=True)
 
 
 def load_quotes(tickers, data_path="data/"):
@@ -463,30 +548,15 @@ if __name__ == "__main__":
     matplotlib.pyplot.show()
 
     # =============================================================================
-    #     Per-ticker insight charts
+    #     best 10 stocks
     # =============================================================================
 
-    for ticker in tickers:
-        df = ohlc_renko[ticker].copy()
-        df = df.set_index("Date")
-
-        # Price
-        df["Adj Close"].plot(title=f"{ticker} Price", figsize=(12, 4))
-        matplotlib.pyplot.show()
-
-        # MACD vs Signal
-        df[["macd", "macd_sig"]].plot(
-            title=f"{ticker} MACD vs Signal", figsize=(12, 4)
-        )
-        matplotlib.pyplot.axhline(0, color="black", linewidth=0.8)
-        matplotlib.pyplot.show()
-
-        # Renko bar_num strength
-        df["bar_num"].plot(title=f"{ticker} Renko bar_num", figsize=(12, 3))
-        matplotlib.pyplot.axhline(2, color="green", linestyle="--")
-        matplotlib.pyplot.axhline(-2, color="red", linestyle="--")
-        matplotlib.pyplot.show()
-
-        df["ret"].hist(bins=80, figsize=(10, 4))
-        matplotlib.pyplot.title(f"{ticker} Distribution of Daily Returns")
-        matplotlib.pyplot.show()
+    best_combinations = find_best_10_stock_combinations(
+        ohlc_renko,
+        combo_size=min(10, len(available_tickers)),
+        top_n=10,
+        quotes_by_day=1,
+        risk_free_rate=0.04,
+    )
+    print("Top stock combinations:")
+    print(best_combinations)
