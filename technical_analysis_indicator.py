@@ -206,12 +206,11 @@ def find_best_10_stock_combinations(
     quotes_by_day: int = 1,
     risk_free_rate: float = 0.04,
     max_combinations: int | None = None,
-    random_state: int = 42,
 ) -> pandas.DataFrame:
-    """Evaluate combinations of stocks using the current ohlc_renko structure.
+    """Evaluate stock combinations using the current ohlc_renko structure.
 
-    Expects ohlc_renko to be a dict keyed by ticker where each value is a
-    DataFrame containing at least ['Date', 'ret'] columns.
+    Parameters are tailored to this project where `ohlc_renko` is a dict in the
+    format: {ticker: DataFrame with columns ['Date', 'ret', ...]}.
     """
     if combo_size <= 0:
         raise ValueError("combo_size must be positive")
@@ -224,37 +223,32 @@ def find_best_10_stock_combinations(
 
     if len(returns_by_ticker) < combo_size:
         raise ValueError(
-            f"Not enough tickers with return data: {len(returns_by_ticker)} available, {combo_size} required"
+            "Not enough tickers with return data: "
+            f"{len(returns_by_ticker)} available, {combo_size} required"
         )
 
     returns_df = pandas.DataFrame(returns_by_ticker).dropna(how="all")
     tickers = sorted(returns_df.columns.tolist())
-    all_combinations = list(itertools.combinations(tickers, combo_size))
 
-    if max_combinations is not None and max_combinations < len(all_combinations):
-        rng = numpy.random.default_rng(random_state)
-        sampled_idx = rng.choice(len(all_combinations), size=max_combinations, replace=False)
-        combinations_to_test = [all_combinations[i] for i in sorted(sampled_idx)]
-    else:
-        combinations_to_test = all_combinations
+    combinations_iter = itertools.combinations(tickers, combo_size)
+    if max_combinations is not None:
+        combinations_iter = itertools.islice(combinations_iter, max_combinations)
 
     rows = []
-    for combo in combinations_to_test:
+    for combo in combinations_iter:
         combo_returns = returns_df[list(combo)].mean(axis=1).dropna()
-
         if combo_returns.empty:
             continue
 
         combo_df = pandas.DataFrame({"ret": combo_returns})
-
         vol = volatility(combo_df, quotes_by_day)
+
         if vol == 0 or pandas.isna(vol):
             continue
 
         cagr_value = cagr(combo_df, quotes_by_day)
         sharpe_value = sharpe(combo_df, quotes_by_day, risk_free_rate)
         max_dd_value = maximum_drawdown(combo_df)
-        score = sharpe_value - max_dd_value
 
         rows.append(
             {
@@ -263,13 +257,20 @@ def find_best_10_stock_combinations(
                 "volatility": vol,
                 "sharpe": sharpe_value,
                 "max_drawdown": max_dd_value,
-                "score": score,
+                "score": sharpe_value - max_dd_value,
             }
         )
 
     if not rows:
         return pandas.DataFrame(
-            columns=["tickers", "cagr", "volatility", "sharpe", "max_drawdown", "score"]
+            columns=[
+                "tickers",
+                "cagr",
+                "volatility",
+                "sharpe",
+                "max_drawdown",
+                "score",
+            ]
         )
 
     results = pandas.DataFrame(rows)
