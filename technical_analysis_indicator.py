@@ -416,9 +416,77 @@ if __name__ == "__main__":
     strategy_df["ret"] = strategy_df.mean(axis=1)
     strategy_df.dropna(inplace=True)
 
-    print("Strategy CAGR:", cagr(strategy_df[["ret"]], quotes_by_day=1))
+    print(
+        "Strategy CAGR:",
+        cagr(
+            strategy_df[["ret"]],
+            quotes_by_day=quotes.index.normalize().value_counts().max(),
+        ),
+    )
     print(
         "Strategy Sharpe:",
-        sharpe(strategy_df[["ret"]], quotes_by_day=1, risk_free_rate=0.04),
+        sharpe(
+            strategy_df[["ret"]],
+            quotes_by_day=quotes.index.normalize().value_counts().max(),
+            risk_free_rate=0.04,
+        ),
     )
     print("Strategy Max Drawdown:", maximum_drawdown(strategy_df[["ret"]]))
+
+    # =============================================================================
+    # Equity curve (strategy growth)
+    # =============================================================================
+    strategy_df["cum_return"] = (1 + strategy_df["ret"]).cumprod()
+    strategy_df["cum_return"].plot(
+        title="Strategy Equity Curve", figsize=(12, 5)
+    )
+    matplotlib.pyplot.ylabel("Growth of $1")
+    matplotlib.pyplot.show()
+
+    # =============================================================================
+    #     Drawdown curve
+    # =============================================================================
+    strategy_df["roll_max"] = strategy_df["cum_return"].cummax()
+    strategy_df["drawdown_pct"] = (
+        strategy_df["cum_return"] / strategy_df["roll_max"] - 1
+    )
+    strategy_df["drawdown_pct"].plot(
+        title="Strategy Drawdown (%)", figsize=(12, 4)
+    )
+    matplotlib.pyplot.show()
+
+    # =============================================================================
+    #     Distribution of daily returns
+    # =============================================================================
+    strategy_df["ret"].hist(bins=80, figsize=(10, 4))
+    matplotlib.pyplot.title("Distribution of Daily Strategy Returns")
+    matplotlib.pyplot.show()
+
+    # =============================================================================
+    #     Per-ticker insight charts
+    # =============================================================================
+
+    for ticker in tickers:
+        df = ohlc_renko[ticker].copy()
+        df = df.set_index("Date")
+
+        # Price
+        df["Adj Close"].plot(title=f"{ticker} Price", figsize=(12, 4))
+        matplotlib.pyplot.show()
+
+        # MACD vs Signal
+        df[["macd", "macd_sig"]].plot(
+            title=f"{ticker} MACD vs Signal", figsize=(12, 4)
+        )
+        matplotlib.pyplot.axhline(0, color="black", linewidth=0.8)
+        matplotlib.pyplot.show()
+
+        # Renko bar_num strength
+        df["bar_num"].plot(title=f"{ticker} Renko bar_num", figsize=(12, 3))
+        matplotlib.pyplot.axhline(2, color="green", linestyle="--")
+        matplotlib.pyplot.axhline(-2, color="red", linestyle="--")
+        matplotlib.pyplot.show()
+
+        df["ret"].hist(bins=80, figsize=(10, 4))
+        matplotlib.pyplot.title(f"{ticker} Distribution of Daily Returns")
+        matplotlib.pyplot.show()
