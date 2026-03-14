@@ -18,6 +18,7 @@ amzn_df.drop(columns=["Open", "High", "Low", "Volume"], inplace=True)
 amzn_df["Date"] = pd.to_datetime(amzn_df["Date"])
 print(amzn_df.dtypes)
 amzn_df.set_index("Date", inplace=True)
+a = 12
 
 aapl_df = pd.read_csv("data/aapl_us_d.csv")
 aapl_df.drop(columns=["Open", "High", "Low", "Volume"], inplace=True)

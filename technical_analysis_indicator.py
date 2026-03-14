@@ -8,7 +8,6 @@ Created on Mon Mar  9 22:13:01 2026
 
 import pandas
 from pathlib import Path
-from twelvedata import TDClient
 import numpy
 from datetime import datetime, timezone, timedelta
 import copy
