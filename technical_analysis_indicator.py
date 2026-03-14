@@ -417,6 +417,48 @@ if __name__ == "__main__":
 
         ohlc_renko[ticker] = merged.reset_index(drop=True)
 
+    # =============================================================================
+    # ) Neutral state ("")
+    # Appends return 0 (no position).
+    #
+    # Can switch to:
+    #
+    # "Buy" if bullish conditions are met:
+    #
+    # bar_num >= 2
+    #
+    # macd > macd_sig
+    #
+    # macd_slope > macd_sig_slope
+    #
+    # "Sell" if bearish conditions are met:
+    #
+    # bar_num <= -2
+    #
+    # macd < macd_sig
+    #
+    # macd_slope < macd_sig_slope.
+    #
+    # 2) Long state ("Buy")
+    # Appends long return:
+    # Adj Close[i] / Adj Close[i-1] - 1.
+    #
+    # Then transition rules:
+    #
+    # flip to "Sell" on strong bearish reversal (bar_num <= -2 + bearish MACD/slope)
+    #
+    # or go flat "" on weaker bearish confirmation (macd < macd_sig and slope confirmation).
+    #
+    # 3) Short state ("Sell")
+    # Appends short return:
+    # Adj Close[i-1] / Adj Close[i] - 1.
+    #
+    # Then transition rules:
+    #
+    # flip to "Buy" on strong bullish reversal (bar_num >= 2 + bullish MACD/slope)
+    #
+    # or go flat "" on weaker bullish confirmation (macd > macd_sig and slope confirmation).
+    # =============================================================================
     for ticker in available_tickers:
         print("calculating daily returns for", ticker)
 
