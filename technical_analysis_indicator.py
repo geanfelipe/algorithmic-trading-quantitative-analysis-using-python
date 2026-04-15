@@ -87,7 +87,7 @@ def atr(quotes: pandas.DataFrame, number_of_periods: int) -> pandas.DataFrame:
     return atr_df
 
 
-def slope(serie: pandas.Series, window: int) -> numpy.array:
+def slope(serie: pandas.Series, window: int) -> numpy.typing.NDArray[numpy.float64]:
     "function to calculate the slope of N consecutive points on a plot"
     slopes = [i * 0 for i in range(window - 1)]
     for i in range(window, len(serie) + 1):
